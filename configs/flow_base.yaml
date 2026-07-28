@@ -1,0 +1,52 @@
+{
+  "data": {
+    "train_root": "/Users/choeseong-yong/Downloads/open/data/train",
+    "eval_root": "/Users/choeseong-yong/Downloads/open/data/eval",
+    "manifest_path": "artifacts/manifests/train_episodes.jsonl",
+    "fold_artifact_path": "artifacts/folds/folds.json",
+    "fold_id": "seeded_group_00_seed_17",
+    "image_height": 192,
+    "image_width": 256,
+    "sequence_length": 16,
+    "target_fps": 6.0,
+    "val_fraction": 0.15,
+    "holdout_group": "validation_group",
+    "short_episode_policy": "filter",
+    "windows_per_episode": 2,
+    "validation_windows_per_episode": 1,
+    "stats_windows_per_episode": 4,
+    "action_clip": 8.0,
+    "num_workers": 8
+  },
+  "model": {
+    "action_dim": 18,
+    "base_channels": 48,
+    "max_flow_pixels": 48.0,
+    "max_residual": 0.5,
+    "causal_action_shift": true
+  },
+  "loss": {
+    "charbonnier_weight": 1.0,
+    "ssim_weight": 0.25,
+    "edge_weight": 0.1,
+    "temporal_weight": 0.25,
+    "flow_smoothness_weight": 0.02,
+    "epsilon": 0.001
+  },
+  "training": {
+    "seed": 20260725,
+    "device": "auto",
+    "epochs": 40,
+    "batch_size": 8,
+    "learning_rate": 0.0002,
+    "minimum_learning_rate": 0.000002,
+    "weight_decay": 0.01,
+    "gradient_clip": 1.0,
+    "amp": true,
+    "max_train_batches": null,
+    "validation_max_batches": 256
+  },
+  "output": {
+    "dir": "outputs/flow_base"
+  }
+}

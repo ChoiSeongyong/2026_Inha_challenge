@@ -1,0 +1,18 @@
+# Merge after dynamicrafter_plus.yaml when selecting continuation settings on
+# episodes that the provided 1,500-step checkpoint did not train on. This split
+# is episode-disjoint but intentionally not owner/repository-disjoint.
+name: inha_dynamicrafter_checkpoint_pristine
+group: inha_dynamicrafter_checkpoint_pristine
+
+data:
+  params:
+    validation_protocol: official_checkpoint_pristine
+    fold_artifact_path: ${oc.env:INHA_PROJECT_ROOT}/artifacts/folds/official_baseline_seed0_pristine.json
+    fold_id: official_baseline_seed0_validation
+    action_stats_path: ${oc.env:INHA_PROJECT_ROOT}/artifacts/stats/dynamicrafter_action_stats_checkpoint_pristine.json
+
+lightning:
+  trainer:
+    logger:
+      params:
+        name: dynamicrafter_checkpoint_pristine

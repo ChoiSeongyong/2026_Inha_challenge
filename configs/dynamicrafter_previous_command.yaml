@@ -1,0 +1,15 @@
+# Merge after dynamicrafter_plus.yaml. Train and validate this as a separate
+# model; never reinterpret a same-step checkpoint with a shifted action stream.
+name: inha_dynamicrafter_previous_command
+group: inha_dynamicrafter_previous_command
+
+data:
+  params:
+    action_alignment: previous_command
+
+lightning:
+  trainer:
+    logger:
+      params:
+        name: dynamicrafter_previous_command
+

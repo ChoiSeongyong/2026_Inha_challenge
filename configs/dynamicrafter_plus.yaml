@@ -1,0 +1,193 @@
+name: inha_dynamicrafter_plus
+group: inha_dynamicrafter_plus
+logdir: ${oc.env:INHA_PROJECT_ROOT}/outputs/dynamicrafter_plus
+
+data:
+  target: inha_worldmodel.dynamicrafter_data.ManifestSO100DataModule
+  params:
+    root: ${oc.env:INHA_OPEN_ROOT}/data/train
+    manifest_path: ${oc.env:INHA_PROJECT_ROOT}/artifacts/manifests/train_episodes.jsonl
+    fold_artifact_path: ${oc.env:INHA_PROJECT_ROOT}/artifacts/folds/folds.json
+    fold_id: seeded_group_00_seed_17
+    validation_protocol: owner_disjoint
+    training_scope: fold_train
+    sampling_strategy: episode_uniform
+    owner_balance_exponent: 0.5
+    action_stats_path: ${oc.env:INHA_PROJECT_ROOT}/artifacts/stats/dynamicrafter_action_stats_fold17.json
+    batch_size: 4
+    num_workers: 8
+    pin_memory: true
+    target_height: 320
+    target_width: 512
+    traj_len: 16
+    target_fps: 6.0
+    # Keep the competition baseline's same-step contract for the first strong
+    # continuation. Merge dynamicrafter_previous_command.yaml only for a
+    # separately trained, held-out ablation.
+    action_alignment: same_step
+    action_representation: raw6
+    val_fraction: 0.15
+    seed: 20260725
+    windows_per_episode: 8
+    validation_windows_per_episode: 1
+    short_episode_policy: filter
+    recompute_action_stats: false
+    # Workers are respawned after the epoch callback updates the deterministic
+    # window seed.  This prevents every epoch from seeing the same windows.
+    persistent_workers: false
+
+model:
+  # Load the frozen public DynamiCrafter VAE/image/text modules first, then the
+  # competition-provided 1,500-step action UNet in train_dynamicrafter_plus.py.
+  pretrained_checkpoint: ${oc.env:INHA_OPEN_ROOT}/baseline/checkpoints/backbone.ckpt
+  resume_action_checkpoint: ${oc.env:INHA_OPEN_ROOT}/baseline/checkpoints/baseline_diffusion.ckpt
+  # The provided action checkpoint was trained with these official statistics.
+  # The trainer analytically reparameterizes the first action layer (main+EMA)
+  # to the selected fold/all-clean normalizer before any optimizer step.
+  initial_action_stats: ${oc.env:INHA_OPEN_ROOT}/data/train/so100_action_statistics.json
+  only_reload_modules:
+    - first_stage_model
+    - cond_stage_model
+    - embedder
+    - image_proj_model
+  base_learning_rate: 5.0e-5
+  scale_lr: false
+  target: lvdm.models.ddpm3d.LatentVisualDiffusion
+  params:
+    # Full Lightning checkpoints are required for exact optimizer/step resume.
+    # A rolling pair is retained below to bound disk usage.
+    save_only_unet: false
+    linear_warmup_steps: 500
+    rescale_betas_zero_snr: true
+    parameterization: v
+    linear_start: 0.00085
+    linear_end: 0.012
+    num_timesteps_cond: 1
+    log_every_t: 200
+    timesteps: 1000
+    first_stage_key: video
+    cond_stage_key: caption
+    cond_stage_trainable: false
+    image_proj_model_trainable: false
+    conditioning_key: hybrid
+    image_size: [40, 64]
+    channels: 4
+    scale_by_std: false
+    scale_factor: 0.18215
+    use_ema: true
+    uncond_prob: 0.05
+    uncond_type: empty_seq
+    rand_cond_frame: false
+    use_dynamic_rescale: true
+    base_scale: 0.7
+    fps_condition_type: fps
+    perframe_ae: true
+
+    unet_config:
+      target: lvdm.modules.networks.openaimodel3d.UNetModel
+      params:
+        action_conditioned: true
+        action_dims: 6
+        action_dropout_prob: 0.0
+        use_scale_shift_norm: true
+        in_channels: 8
+        out_channels: 4
+        model_channels: 32
+        attention_resolutions: [4, 2]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 3]
+        dropout: 0.1
+        num_head_channels: 16
+        transformer_depth: 1
+        context_dim: 1024
+        use_linear: true
+        use_checkpoint: true
+        temporal_conv: true
+        temporal_attention: true
+        temporal_selfatt_only: true
+        use_relative_position: false
+        use_causal_attention: false
+        temporal_length: 16
+        addition_attention: true
+        image_cross_attention: true
+        default_fs: 6
+        fs_condition: false
+
+    first_stage_config:
+      target: lvdm.models.autoencoder.AutoencoderKL
+      params:
+        embed_dim: 4
+        monitor: val/rec_loss
+        ddconfig:
+          double_z: true
+          z_channels: 4
+          resolution: 256
+          in_channels: 3
+          out_ch: 3
+          ch: 128
+          ch_mult: [1, 2, 4, 4]
+          num_res_blocks: 2
+          attn_resolutions: []
+          dropout: 0.0
+        lossconfig:
+          target: torch.nn.Identity
+
+    cond_stage_config:
+      target: lvdm.modules.encoders.condition.FrozenOpenCLIPEmbedder
+      params:
+        freeze: true
+        layer: penultimate
+
+    img_cond_stage_config:
+      target: lvdm.modules.encoders.condition.FrozenOpenCLIPImageEmbedderV2
+      params:
+        freeze: true
+
+    image_proj_stage_config:
+      target: lvdm.modules.encoders.resampler.Resampler
+      params:
+        dim: 1024
+        depth: 4
+        dim_head: 64
+        heads: 12
+        num_queries: 16
+        embedding_dim: 1280
+        output_dim: 1024
+        ff_mult: 4
+        video_length: 16
+
+lightning:
+  precision: 16
+  trainer:
+    strategy: ddp
+    replace_sampler_ddp: false
+    accelerator: gpu
+    devices: 1
+    num_nodes: 1
+    benchmark: true
+    accumulate_grad_batches: 2
+    max_steps: 30000
+    max_time: "03:20:00:00"
+    val_check_interval: 1000
+    # The official validation_step randomly drops conditions and the ordered
+    # prefix is repository-biased.  Checkpoint selection is done by the fixed
+    # held-out DDIM validator instead.
+    limit_val_batches: 0
+    num_sanity_val_steps: 0
+    log_every_n_steps: 10
+    gradient_clip_algorithm: norm
+    gradient_clip_val: 1.0
+    logger:
+      target: pytorch_lightning.loggers.CSVLogger
+      params:
+        save_dir: ${oc.env:INHA_PROJECT_ROOT}/outputs/logs
+        name: dynamicrafter_plus
+  callbacks:
+    model_checkpoint:
+      target: pytorch_lightning.callbacks.ModelCheckpoint
+      params:
+        filename: "{epoch}-{step}"
+        save_weights_only: false
+        every_n_train_steps: 1000
+        save_top_k: 1
+        save_last: true

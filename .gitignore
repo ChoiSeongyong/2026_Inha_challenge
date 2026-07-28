@@ -1,0 +1,16 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+artifacts/*
+!artifacts/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+data
+official_baseline
+official_submission_kit

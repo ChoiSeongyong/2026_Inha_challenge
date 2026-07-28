@@ -1,0 +1,23 @@
+# Merge after dynamicrafter_plus.yaml to expose normalized absolute action,
+# delta-from-window-start, and first difference.  The strict trainer expands
+# only action_embed.0 (main + EMA) from 6 to 18 inputs with zero new columns,
+# so initialization is exactly equivalent to the provided 6D checkpoint.
+name: inha_dynamicrafter_kinematic18
+group: inha_dynamicrafter_kinematic18
+
+data:
+  params:
+    action_representation: absolute_delta_velocity18
+
+model:
+  params:
+    unet_config:
+      params:
+        action_dims: 18
+
+lightning:
+  trainer:
+    logger:
+      params:
+        name: dynamicrafter_kinematic18
+

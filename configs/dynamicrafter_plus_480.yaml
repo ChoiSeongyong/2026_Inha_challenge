@@ -1,0 +1,23 @@
+# Merge after dynamicrafter_plus.yaml for the full-resolution quality/runtime
+# gate.  Keep this variant only if a 100-step benchmark and 216-sample dry-run
+# satisfy the four-day training and one-hour inference limits.
+name: inha_dynamicrafter_plus_480
+group: inha_dynamicrafter_plus_480
+
+data:
+  params:
+    target_height: 480
+    target_width: 640
+    batch_size: 1
+
+model:
+  params:
+    image_size: [60, 80]
+
+lightning:
+  trainer:
+    accumulate_grad_batches: 8
+    logger:
+      params:
+        name: dynamicrafter_plus_480
+

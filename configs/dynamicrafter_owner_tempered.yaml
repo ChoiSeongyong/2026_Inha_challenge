@@ -1,0 +1,17 @@
+# Merge after dynamicrafter_plus.yaml (and any resolution overlay) to ablate
+# the severe owner imbalance without forcing every small owner to contribute
+# equally.  Select this only on the fixed repository/owner-disjoint holdout.
+name: inha_dynamicrafter_owner_tempered
+group: inha_dynamicrafter_owner_tempered
+
+data:
+  params:
+    sampling_strategy: owner_tempered
+    owner_balance_exponent: 0.5
+
+lightning:
+  trainer:
+    logger:
+      params:
+        name: dynamicrafter_owner_tempered
+

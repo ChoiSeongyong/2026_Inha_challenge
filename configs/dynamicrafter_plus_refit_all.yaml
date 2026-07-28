@@ -1,0 +1,19 @@
+# Merge after the selected resolution config.  Use only after alignment,
+# resolution, sampler, and update budget have been frozen on the strict
+# holdout.  This final refit consumes every manifest-approved train episode;
+# its fold validation view is intentionally disabled and must not be scored.
+name: inha_dynamicrafter_plus_refit_all
+group: inha_dynamicrafter_plus_refit_all
+
+data:
+  params:
+    training_scope: all_clean
+    action_stats_path: ${oc.env:INHA_PROJECT_ROOT}/artifacts/stats/dynamicrafter_action_stats_all_clean.json
+
+lightning:
+  trainer:
+    limit_val_batches: 0
+    logger:
+      params:
+        name: dynamicrafter_plus_refit_all
+

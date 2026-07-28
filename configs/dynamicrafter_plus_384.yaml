@@ -1,0 +1,22 @@
+# Merge after dynamicrafter_plus.yaml.  This preserves the native 4:3 frame
+# without side padding while keeping a safer inference budget than full 480p.
+name: inha_dynamicrafter_plus_384
+group: inha_dynamicrafter_plus_384
+
+data:
+  params:
+    target_height: 384
+    target_width: 512
+    batch_size: 2
+
+model:
+  params:
+    image_size: [48, 64]
+
+lightning:
+  trainer:
+    accumulate_grad_batches: 4
+    logger:
+      params:
+        name: dynamicrafter_plus_384
+
