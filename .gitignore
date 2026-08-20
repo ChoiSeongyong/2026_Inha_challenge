@@ -11,6 +11,22 @@ artifacts/*
 outputs/*
 !outputs/.gitkeep
 
+# Local datasets, upstream checkouts, pretrained weights, and run products.
+# None of these are redistributed by this source-only repository.
+models/
+nohup.out
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.mp4
+submission*.csv
+
+# Local credentials and machine-specific environment files.
+.env
+.env.*
+*.pem
+
 data
 official_baseline
 official_submission_kit

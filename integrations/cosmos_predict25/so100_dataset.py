@@ -41,7 +41,11 @@ TARGET_FPS = 6.0
 DATASET_NUM_FRAMES = 16
 COSMOS_VAE_NUM_FRAMES = 17
 COSMOS_TEMPORAL_COMPRESSION = 4
-DEFAULT_IMAGE_SIZE = (480, 640)
+# Cosmos-Predict2.5 2B action-cond is trained at 256x320.  Keep the
+# competition's 480x640 contract at the artifact boundary, but do not train
+# the 2B backbone at a different spatial shape than its public checkpoint.
+DEFAULT_IMAGE_SIZE = (256, 320)
+SUBMISSION_IMAGE_SIZE = (480, 640)
 STATS_SCHEMA_VERSION = 1
 
 
@@ -763,7 +767,14 @@ class SO100CosmosDataset(_TorchDataset):
         ] = default_parquet_reader,
         video_reader: Callable[[Path, Sequence[int]], np.ndarray] = opencv_video_reader,
         allow_empty: bool = False,
+        **_legacy_upstream_dataset_kwargs: Any,
     ) -> None:
+        # The official action experiment nests Bridge-only fields under the
+        # dataloader dataset node.  Hydra merges those fields into this local
+        # dataset even after the dataset object is replaced by the SO-100
+        # overlay.  They do not affect this manifest-driven adapter because
+        # its explicit arguments above define the complete data contract.
+        del _legacy_upstream_dataset_kwargs
         super().__init__()
         if window_stride <= 0:
             raise ValueError("window_stride must be positive")
@@ -821,10 +832,13 @@ class SO100CosmosDataset(_TorchDataset):
                 )
         self.robust_stats = robust_stats
         if self.include_zero_text_embedding:
+            # Cosmos-Predict2.5's action-conditioned 2B network receives one
+            # cross-attention token whose feature vector is the flattened
+            # Reason1 embedding: 98 tokens x 1024 channels = 100352.
             self._zero_text_embedding = (
-                torch.zeros((512, 1024), dtype=torch.bfloat16)
+                torch.zeros((1, 100352), dtype=torch.bfloat16)
                 if torch is not None
-                else np.zeros((512, 1024), dtype=np.float32)
+                else np.zeros((1, 100352), dtype=np.float32)
             )
         else:
             self._zero_text_embedding = None

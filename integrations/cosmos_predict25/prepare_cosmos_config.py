@@ -37,8 +37,11 @@ class CosmosAdapterConfig:
     model_num_frames: int = 17
     temporal_compression: int = 4
     state_t: int = 5
-    height: int = 480
-    width: int = 640
+    # Native resolution of the public Cosmos-Predict2.5 2B robot/action-cond
+    # checkpoint.  Generated videos are upscaled to the competition contract
+    # only after inference.
+    height: int = 256
+    width: int = 320
     fps: float = 6.0
     num_conditional_frames: int = 1
     network: str = GLOBAL_ACTION_NETWORK
@@ -52,8 +55,8 @@ class CosmosAdapterConfig:
             "action_dim": 6,
             "num_action_per_chunk": 15,
             "dataset_num_frames": 16,
-            "height": 480,
-            "width": 640,
+            "height": 256,
+            "width": 320,
             "num_conditional_frames": 1,
         }
         for name, value in expected.items():

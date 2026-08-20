@@ -1,0 +1,128 @@
+diff --git a/cosmos_predict2/_src/predict2/action/configs/action_conditioned/conditioner.py b/cosmos_predict2/_src/predict2/action/configs/action_conditioned/conditioner.py
+index 90f2022..bd5913c 100644
+--- a/cosmos_predict2/_src/predict2/action/configs/action_conditioned/conditioner.py
++++ b/cosmos_predict2/_src/predict2/action/configs/action_conditioned/conditioner.py
+@@ -101,20 +101,27 @@ class Video2WorldCondition(Text2WorldCondition):
+             B, 1, T, H, W, dtype=gt_frames.dtype, device=gt_frames.device
+         )
+         if T == 1:  # handle image batch
+-            num_conditional_frames_B = torch.zeros(B, dtype=torch.int32)
++            num_conditional_frames_B = torch.zeros(B, dtype=torch.int32, device=gt_frames.device)
+         else:  # handle video batch
+             if num_conditional_frames is not None:
+-                num_conditional_frames_B = torch.ones(B, dtype=torch.int32) * num_conditional_frames
++                num_conditional_frames_B = torch.ones(
++                    B, dtype=torch.int32, device=gt_frames.device
++                ) * num_conditional_frames
+             elif conditional_frames_probs is not None:
+                 # Use weighted sampling based on provided probabilities
+                 frames_options = list(conditional_frames_probs.keys())
+                 weights = list(conditional_frames_probs.values())
+                 num_conditional_frames_B = torch.tensor(
+-                    random.choices(frames_options, weights=weights, k=B), dtype=torch.int32
++                    random.choices(frames_options, weights=weights, k=B),
++                    dtype=torch.int32,
++                    device=gt_frames.device,
+                 )
+             else:
+                 num_conditional_frames_B = torch.randint(
+-                    random_min_num_conditional_frames, random_max_num_conditional_frames + 1, size=(B,)
++                    random_min_num_conditional_frames,
++                    random_max_num_conditional_frames + 1,
++                    size=(B,),
++                    device=gt_frames.device,
+                 )
+         for idx in range(B):
+             condition_video_input_mask_B_C_T_H_W[idx, :, : num_conditional_frames_B[idx], :, :] += 1
+diff --git a/cosmos_predict2/_src/predict2/action/networks/action_conditioned_minimal_v1_lvg_dit.py b/cosmos_predict2/_src/predict2/action/networks/action_conditioned_minimal_v1_lvg_dit.py
+index d4bbe13..94c7b62 100644
+--- a/cosmos_predict2/_src/predict2/action/networks/action_conditioned_minimal_v1_lvg_dit.py
++++ b/cosmos_predict2/_src/predict2/action/networks/action_conditioned_minimal_v1_lvg_dit.py
+@@ -53,6 +53,13 @@ class ActionConditionedMinimalV1LVGDiT(MiniTrainDIT):
+         if "action_dim" in kwargs:
+             del kwargs["action_dim"]
+ 
++        # The base action experiment carries this field for other action
++        # network variants, but MiniTrainDIT does not accept it.  Training
++        # removed it through a Hydra override; inference composes the config
++        # directly, so normalize the same contract here.
++        if "temporal_compression_ratio" in kwargs:
++            del kwargs["temporal_compression_ratio"]
++
+         num_action_per_chunk = kwargs.get("num_action_per_chunk", 12)
+         if "num_action_per_chunk" in kwargs:
+             del kwargs["num_action_per_chunk"]
+diff --git a/cosmos_predict2/_src/predict2/callbacks/every_n_draw_sample.py b/cosmos_predict2/_src/predict2/callbacks/every_n_draw_sample.py
+index e124d34..814ba95 100644
+--- a/cosmos_predict2/_src/predict2/callbacks/every_n_draw_sample.py
++++ b/cosmos_predict2/_src/predict2/callbacks/every_n_draw_sample.py
+@@ -343,16 +343,30 @@ class EveryNDrawSample(EveryN):
+         file_base_fp = f"{base_fp_wo_ext}_resize.jpg"
+         local_path = f"{self.local_dir}/{file_base_fp}"
+ 
+-        if self.rank == 0 and wandb.run:
++        # Keep a local artifact even when WandB is disabled.  The upstream
++        # callback only wrote this preview inside ``if wandb.run``, which
++        # made the generated samples disappear in offline runs.  Save a
++        # composite MP4 containing the generated samples and the reference
++        # sequence; this is useful for inspecting training without WandB.
++        if self.rank == 0:
+             if is_single_frame:  # image case
+                 to_show = rearrange(
+                     to_show[:, :n_viz_sample],
+                     "n b c t h w -> t c (n h) (b w)",
+                 )
+                 image_grid = torchvision.utils.make_grid(to_show, nrow=1, padding=0, normalize=False)
+-                # resize so that wandb can handle it
+                 torchvision.utils.save_image(resize_image(image_grid, 1024), local_path, nrow=1, scale_each=True)
+             else:
++                local_video = rearrange(
++                    to_show[:, :n_viz_sample],
++                    "n b c t h w -> c t (n h) (b w)",
++                )
++                save_img_or_video(
++                    local_video,
++                    f"{self.local_dir}/{base_fp_wo_ext}",
++                    fps=self.fps,
++                )
++
+                 to_show = to_show[:, :n_viz_sample]  # [n, b, c, 3, h, w]
+ 
+                 # resize 3 frames frames so that we can display them on wandb
+@@ -365,7 +379,6 @@ class EveryNDrawSample(EveryN):
+                     "n b c t h w -> 1 c (n h) (b t w)",
+                 )
+ 
+-                # resize so that wandb can handle it
+                 image_grid = torchvision.utils.make_grid(to_show, nrow=1, padding=0, normalize=False)
+                 torchvision.utils.save_image(
+                     resize_image(image_grid, log_image_size), local_path, nrow=1, scale_each=True
+diff --git a/cosmos_predict2/_src/predict2/inference/video2world.py b/cosmos_predict2/_src/predict2/inference/video2world.py
+index 4129bc0..512354a 100644
+--- a/cosmos_predict2/_src/predict2/inference/video2world.py
++++ b/cosmos_predict2/_src/predict2/inference/video2world.py
+@@ -557,6 +557,24 @@ class Video2WorldInference:
+                 )
+         elif isinstance(input_path, torch.Tensor):
+             vid_input = input_path
++            # SO-100 provides one clean frame plus a 15-action horizon (16
++            # pixel frames). WAN2.1 requires 17 pixel frames for state_t=5.
++            # Add only synthetic zero tail frames here; the local inference
++            # wrapper removes the synthetic decoded tail before submission.
++            if vid_input.shape[2] < model_required_frames:
++                pad_frames = model_required_frames - vid_input.shape[2]
++                padding = torch.zeros(
++                    vid_input.shape[0],
++                    vid_input.shape[1],
++                    pad_frames,
++                    vid_input.shape[3],
++                    vid_input.shape[4],
++                    dtype=vid_input.dtype,
++                    device=vid_input.device,
++                )
++                vid_input = torch.cat([vid_input, padding], dim=2)
++            elif vid_input.shape[2] > model_required_frames:
++                vid_input = vid_input[:, :, :model_required_frames]
+         else:
+             raise ValueError(f"Unsupported input_path type: {type(input_path)}")
+ 

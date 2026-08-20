@@ -118,7 +118,7 @@ def _load_initial_action_checkpoint(
 
 
 def main() -> None:
-    preliminary = argparse.ArgumentParser(add_help=False)
+    preliminary = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     preliminary.add_argument(
         "--baseline-root",
         default=os.environ.get("INHA_BASELINE_ROOT", "official_baseline"),

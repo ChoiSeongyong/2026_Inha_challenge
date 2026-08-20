@@ -8,7 +8,8 @@
 
 | 항목 | 값 |
 |---|---:|
-| 데이터 비디오 | RGB `uint8 [C,16,480,640]` |
+| Cosmos 학습 비디오 | RGB `uint8 [C,16,256,320]` |
+| 제출 비디오 | MP4 `640×480`, 16 frames, 6 fps |
 | 조건 프레임 | 맨 앞 clean frame 1장 |
 | 원본 action | `float32 [16,6]` |
 | 인과 조건 | `action[0:15] -> video[1:16]`, 즉 `[15,6]` |
@@ -62,11 +63,11 @@ Dataset 샘플의 핵심 키는 다음과 같다.
 
 ```python
 sample = {
-    "video": ...,                  # uint8 [3,16,480,640]
+    "video": ...,                  # uint8 [3,16,256,320] (native checkpoint size)
     "action": ...,                 # normalized float32 [15,6]
     "raw_action": ...,             # raw float32 [15,6]
     "fps": ...,                    # 6.0
-    "padding_mask": ...,           # aspect padding mask [1,480,640]
+    "padding_mask": ...,           # aspect padding mask [1,256,320]
     "num_conditional_frames": 1,
 }
 ```
@@ -74,7 +75,10 @@ sample = {
 Upstream `ActionConditionedConditioner`가 읽는 key는 단수형 `action`이다.
 10 fps episode는 실제 timestamp에 맞춰 6 fps index
 `[0,2,3,5,7,8,10,12,13,15,17,18,20,22,23,25]`로 리샘플한다.
-이미지는 찌그러뜨리지 않고 480×640 letterbox로 맞춘다.
+이미지는 찌그러뜨리지 않고 공식 action-cond 체크포인트의 256×320
+native resolution으로 letterbox한다. 추론 후 별도 래퍼가 640×480 MP4로
+변환한다. 480×640로 2B 백본을 직접 학습하면 공개 체크포인트의 공간
+계약과 VRAM 예산을 동시에 깨므로 사용하지 않는다.
 
 ## CPU 준비와 검증
 
@@ -141,7 +145,7 @@ python integrations/cosmos_predict25/prepare_cosmos_config.py \
 - `action_dim=6`
 - `num_action_per_chunk=15`
 - dataset 16프레임, WAN model 17프레임, `state_t=5`
-- 480×640, 6 fps, conditional frame 1장
+- 256×320 native model resolution, 6 fps, conditional frame 1장
 - `context_parallel_size=1`
 - 공식 `2B/robot/action-cond` UUID
   `38c6c645-7d41-4560-8eeb-6f4ddc0e6574`
@@ -154,28 +158,96 @@ python integrations/cosmos_predict25/prepare_cosmos_config.py \
 `strict_resume=False`는 위 두 누락 weight를 허용하기 위한 것이며, 광범위한
 무시 정책으로 사용하면 안 된다.
 
-## 학습 명령 템플릿 — 실행 전용, 여기서는 미실행
+## 학습 명령 — 사용자가 실행
 
-Upstream 설치와 모델 사용권 검토가 끝난 뒤 다음 환경을 사용한다.
+먼저 Hugging Face에서 [Cosmos-Predict2.5-2B 모델 페이지](https://huggingface.co/nvidia/Cosmos-Predict2.5-2B)의
+접근 조건을 승인하고, 서버에서 Cosmos 전용 환경에 로그인한다. `hf` 명령은
+기본 `inha_sy` 환경이 아니라 upstream `.venv`에 설치되어 있다.
+
+```bash
+/home/video_generation/inha_challenge/ChoiSeongYong/cosmos-predict2.5/.venv/bin/hf auth login
+```
+
+로그인 후 다음 명령을 사용한다. 래퍼는 `inha_sy`에서 호출해도 공식
+`cosmos-predict2.5/.venv/bin/torchrun`과 `cosmos_oss`를 자동으로 선택한다.
 아래 학습 명령을 실행하면 upstream이 공식 체크포인트를 내려받을 수 있다.
 
 ```bash
-export INHA_WORKSPACE=/Users/choeseong-yong/Inha_challenge
-export COSMOS_ROOT=/path/to/cosmos-predict2.5
-export INHA_MANIFEST="$INHA_WORKSPACE/artifacts/manifests/train_episodes.jsonl"
-export INHA_TRAIN_ROOT=/Users/choeseong-yong/Downloads/open/data/train
-export INHA_ACTION_STATS="$INHA_WORKSPACE/artifacts/cosmos_predict25/action_robust_stats_fold17.json"
-export INHA_FOLD_ARTIFACT="$INHA_WORKSPACE/artifacts/folds/folds.json"
-export INHA_FOLD_ID=seeded_group_00_seed_17
-export INHA_NUM_WORKERS=4
-export PYTHONPATH="$INHA_WORKSPACE:$COSMOS_ROOT:${PYTHONPATH:-}"
+conda activate inha_sy
+cd /home/video_generation/inha_challenge/ChoiSeongYong/Inha_challenge
+export CUDA_VISIBLE_DEVICES=1
 
-cd "$COSMOS_ROOT"
-torchrun --nproc_per_node=1 --master_port=12341 -m scripts.train \
-  --config=cosmos_predict2/_src/predict2/action/configs/action_conditioned/config.py \
-  -- experiment=inha_so100_action_16f \
-  trainer.grad_accum_iter=8
+python scripts/run_cosmos_predict25_so100.py \
+  --upstream-root /home/video_generation/inha_challenge/ChoiSeongYong/cosmos-predict2.5 \
+  --open-root /home/video_generation/inha_challenge/ChoiSeongYong/data_challenge \
+  --output-root outputs/cosmos_predict25_so100_60k \
+  --max-iter 60000 \
+  --grad-accum-iter 8 \
+  --execute
 ```
+
+래퍼는 먼저 upstream commit/source contract, audited train fold, train-only
+action 통계를 검증하고, `cosmos_predict2/experiments/inha_so100.py` overlay를
+생성한 다음 공식 `scripts.train`을 단일 GPU로 실행한다. `--execute`를 빼면
+명령과 설정만 기록한다. `--execute`는 공식 checkpoint 다운로드/사용을
+시작할 수 있으므로 NVIDIA 모델 사용권을 먼저 수락해야 한다.
+
+학습 로그와 checkpoint는 `--output-root` 아래의 공식 Cosmos 출력 구조에
+생성된다. 중단 후 재개할 때는 같은 output root와 같은 config를 유지하고,
+upstream 공식 checkpoint resume 규칙에 맞춰 실행한다. 새 output root를
+만들어 초기 checkpoint부터 다시 시작하면 안 된다.
+
+## 추론 명령 — 16개 action으로 16프레임 생성
+
+학습 checkpoint를 공식 `convert_distcp_to_pt.py`로 `model_ema_bf16.pt`로
+변환한 뒤 다음 래퍼를 사용한다.
+
+먼저 동일한 checkpoint와 동일한 `num_steps`로 8개 샘플 benchmark를 실행한다.
+
+```bash
+python scripts/infer_cosmos_predict25_so100.py \
+  --upstream-root /home/video_generation/inha_challenge/ChoiSeongYong/cosmos-predict2.5 \
+  --eval-root /home/video_generation/inha_challenge/ChoiSeongYong/data_challenge/data/eval \
+  --stats artifacts/cosmos_predict25/action_robust_stats_fold17.json \
+  --checkpoint outputs/cosmos_predict25_so100_60k/.../model_ema_bf16.pt \
+  --output-root outputs/cosmos_predict25_benchmark_35step \
+  --num-steps 35 \
+  --limit 8 \
+  --execute
+```
+
+benchmark의 보수적 1.2배 projected wall time이 55분 미만일 때만 전체
+inference가 허용된다. 최종 명령은 반드시 `--budget-manifest`를 포함한다.
+
+```bash
+python scripts/infer_cosmos_predict25_so100.py \
+  --upstream-root /home/video_generation/inha_challenge/ChoiSeongYong/cosmos-predict2.5 \
+  --eval-root /home/video_generation/inha_challenge/ChoiSeongYong/data_challenge/data/eval \
+  --stats artifacts/cosmos_predict25/action_robust_stats_fold17.json \
+  --checkpoint outputs/cosmos_predict25_so100_60k/.../model_ema_bf16.pt \
+  --output-root outputs/cosmos_predict25_inference_35step \
+  --num-steps 35 \
+  --budget-manifest outputs/cosmos_predict25_benchmark_35step/inference_manifest.json \
+  --execute
+```
+
+이 명령은 공식 action-conditioned inference를 호출해 256×320에서 16프레임을
+생성하고, 제출용 `predictions/*.mp4`를 640×480/6fps로 만든다. 최종 대회
+제출 전에는 먼저 submission kit과 분리된 MP4 audit를 실행한다.
+
+```bash
+python scripts/audit_videos.py \
+  --video-root outputs/cosmos_predict25_inference_35step/predictions \
+  --eval-root /home/video_generation/inha_challenge/ChoiSeongYong/data_challenge/data/eval \
+  --expected-count 216 \
+  --output outputs/cosmos_predict25_inference_35step/video_audit.json
+```
+
+audit가 통과한 뒤에만 MP4를 공식 kit의 `input_videos/`에 복사하고
+`make_submission_csv.py`를 실행한다. 모델 래퍼는 CSV를 만들거나 후처리하지
+않는다. inference 래퍼가 함께 저장하는
+`predictions/inference_provenance.json`은 모델·checkpoint·조건·MP4 hash를
+고정하는 용도다.
 
 Upstream 공식 문서도 action-conditioned model은 multi-GPU/context parallel을
 지원하지 않는다고 명시하므로 `nproc_per_node=1`,
@@ -183,7 +255,9 @@ Upstream 공식 문서도 action-conditioned model은 multi-GPU/context parallel
 
 ## RTX PRO 6000 96GB: 1시간 gate와 4일 예산
 
-1시간 gate를 통과하기 전에는 4일 run을 시작하지 않는다.
+1시간 gate와 100-step GPU smoke test를 통과하기 전에는 4일 run을 시작하지
+않는다. 전체 inference는 같은 step 수의 benchmark manifest가 없으면
+실행 자체를 거부한다.
 
 Gate 통과 조건:
 
@@ -208,7 +282,7 @@ Gate 통과 조건:
 긴 run에서는 train loss 최저값이 아니라 validation video 품질과
 action-sensitivity를 함께 사용해 checkpoint를 고른다.
 
-## DMD2 4-step — 문서화만, 미실행
+## DMD2 4-step — SO-100 계약 검증 전에는 실행 금지
 
 공식 [action post-training 문서](https://github.com/nvidia-cosmos/cosmos-predict2.5/blob/main/docs/post-training_video2world_action.md)는
 다음 DMD2 experiment와 inference `--num-steps 4`를 제시한다.
@@ -228,10 +302,9 @@ python examples/action_conditioned.py \
 ```
 
 이 공식 recipe는 Bridge 7D/12-action/13-frame용이다. SO-100
-6D/15-action/16→17 adapter에는 그대로 실행하면 안 되며 teacher와 동일한
-dataset, network, action shape, tail-padding contract를 반영한 별도 DMD2
-experiment가 필요하다. teacher가 1시간 gate와 validation을 먼저 통과해야
-증류를 고려한다.
+6D/15-action/16→17 adapter에는 그대로 실행하면 안 된다. teacher가 validation에서
+개선되고도 benchmark를 통과하지 못할 때만, teacher와 동일한 dataset, network,
+action shape, tail-padding contract를 반영한 별도 DMD2 experiment를 추가한다.
 
 ## 공식 자료와 라이선스
 

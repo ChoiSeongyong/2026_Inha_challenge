@@ -388,6 +388,11 @@ def main() -> int:
         raise RuntimeError("Held-out DynamiCrafter sampling requires CUDA")
     device = torch.device("cuda:0")
     _set_deterministic_seed(args.seed)
+    # On recent PyTorch/CUDA builds, resetting peak-memory statistics before
+    # the selected device has a CUDA context raises "Invalid device argument".
+    # Initialize the visible device first; CUDA_VISIBLE_DEVICES remaps GPU 1
+    # to this local cuda:0 process index.
+    torch.cuda.init()
     torch.cuda.reset_peak_memory_stats(device)
 
     config_paths = [Path(path).expanduser().resolve() for path in args.config]
@@ -630,6 +635,9 @@ def main() -> int:
                 f"{tuple(generated.shape)} vs {tuple(target_video.shape)}"
             )
         # Production output hard-preserves the observed first frame.
+        # ``generated`` was produced under inference_mode; clone outside that
+        # context before its required in-place first-frame replacement.
+        generated = generated.clone()
         generated[:, :, 0] = target_video[:, :, 0]
         prediction = generated.add(1.0).mul(0.5).clamp(0.0, 1.0)
         target = target_video.add(1.0).mul(0.5).clamp(0.0, 1.0)

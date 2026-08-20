@@ -1,265 +1,435 @@
-# 2026 INHA AI Challenge
+# 2026 INHA AI Challenge — Action-Conditioned Robot World Models
 
-현재 로봇 이미지 1장과 16-step 6D action으로 16-frame 미래 영상을
-생성하는 프로젝트입니다. 목표는 규정을 지키면서 Private Score를
-최소화하는 것입니다.
+초기 로봇 이미지 1장과 16-step 6D action sequence를 입력으로 받아
+16-frame 미래 영상을 생성한 2026 인하 인공지능 챌린지 프로젝트입니다.
 
-## 현재 상태
+이 저장소는 대회 기간에 실험한 세 모델 경로와 데이터 감사, 학습, 추론,
+제출 전 검증 코드를 함께 보존합니다. 최종 고용량 경로는
+**Wan2.1-I2V-14B + ABot-PhysWorld SFT DiT + VACE v2 action adapter**입니다.
 
-- 원본 train: 128 repositories, 11,132 episodes, 1,025,666 frames
-- 품질 정제 후: 126 repositories, 11,002 episodes
-- 주 모델선택 split: `official_baseline_seed0_validation`
-  - 제공 checkpoint가 학습하지 않은 train episode만 validation 548개
-  - continuation train 10,454 / episode overlap 0
-- 보조 일반화 fold: `seeded_group_00_seed_17`
-  - train 8,802 / validation 2,200, owner/repository overlap 0
-- 측정 상태는 `action[t]`에 대해 `state[t+1]` 반응이 가장 강함
-- DynamiCrafter 첫 주력은 공식 checkpoint와 호환되는 `same_step`
-  conditioning을 유지해 action 15까지 사용하고, `previous_command`는
-  엄격한 holdout에서만 별도 ablation
-- eval 입력: 216개, RGB 480×640, action `(16,6)`
-- 150개 CPU 테스트와 실제 MP4/Parquet 1-step
-  학습→checkpoint→16-frame 6fps 640×480 MP4 추론을 통과
-- DynamiCrafter checkpoint는 main UNet 전체/EMA 전체/optimizer/step/config·
-  fold·통계 hash를 검사하며, 부분 EMA나 weight-only 재시작을 거부
-- holdout 선택 후 정제 train 11,002 episodes 전체 refit 경로 준비
+> 이 저장소에는 대회 데이터, 사전학습 가중치, 학습 checkpoint, 생성 MP4,
+> 제출 CSV가 포함되지 않습니다. 각 파일은 원 배포처와 라이선스를 확인한 뒤
+> 별도로 준비해야 합니다.
 
-주력 후보 순서는 다음과 같습니다.
+## 문제와 제약
 
-1. 대회 제공 action-conditioned DynamiCrafter를 정제 fold에서 추가 학습
-2. NVIDIA Cosmos-Predict2.5 2B action-conditioned post-training + 4-step DMD2
-3. 고해상도 articulated layer warper
-4. flow/residual 모델은 안전한 배관·fallback
+- 입력: RGB 초기 이미지 480×640 1장, action (16, 6)
+- 출력: 미래 영상 16 frames, 6 FPS, 640×480 MP4
+- 평가: 0.3 × DINO + 0.3 × Video Feature + 0.4 × Action
+- 목표: 낮을수록 좋음
+- 데이터: 대회 train만 학습에 사용하고 eval은 학습·검증에 사용하지 않음
+- 계산 제한: RTX PRO 6000 96GB 1장 기준 학습 4일, 전체 eval 추론 1시간
+- 제출: 최종 MP4 확정 후 원본 submission kit으로 CSV를 한 번 생성
 
-## 디렉터리
+규칙 스냅샷은 [reports/RULES.md](reports/RULES.md), 데이터 감사는
+[reports/DATA_AUDIT.md](reports/DATA_AUDIT.md)에 있습니다.
 
-- `src/inha_worldmodel/`: 데이터, fold, 모델, loss, 학습·추론
-- `integrations/cosmos_predict25/`: Cosmos 2.5 독립 어댑터
-- `configs/`: flow, articulated, DynamiCrafter 설정
-- `scripts/`: manifest/fold/stats/학습/추론/MP4 감사
-- `tests/`: CPU 단위·통합 테스트
-- `reports/`: 규칙, 데이터, 검증, 모델 전략, 실행 문서
-- `outputs/`: checkpoint와 로그
-- `artifacts/`: 생성 영상, fold, 통계, provenance
-- `data`: `Downloads/open/data` 읽기 링크
-- `official_baseline`: 대회 제공 baseline 읽기 링크
-- `official_submission_kit`: 대회 제공 submission kit 읽기 링크
+## 최종 모델: ABot/Wan VACE v2
 
-## 절대 실행 경계
+첫 구현은 6D action을 RGB pseudo-trajectory로 렌더링해 VAE로 인코딩했습니다.
+v2는 한 관절을 잃고 자연영상 VAE에 제어값 해석을 맡기는 이 경로를 버리고,
+모든 관절을 latent VACE context에 직접 주입합니다.
 
-```text
-train 데이터만 사용한 학습/검증
-        ↓
-eval image/action을 입력으로 고정 checkpoint 독립 추론
-        ↓
-최종 MP4 216개 확정 및 일반 MP4 형식 감사
-        ↓
-원본 submission_kit을 수정 없이 CSV 변환에만 1회 실행
-        ↓
-생성 CSV를 수정하지 않고 제출
-```
+~~~text
+initial RGB image ───────────────────────────────┐
+                                                │
+action [16, 6]                                  │
+  ├─ train-fold median/IQR normalization        │
+  ├─ absolute command              [16, 6]      │
+  ├─ displacement from first action [16, 6]     │
+  └─ temporal delta                [16, 6]      │
+                 │                              │
+                 ▼                              │
+        action features [17, 18]                │
+                 │                              │
+       latent action encoder + Fourier XY       │
+                 │                              │
+      direct VACE context [B, 96, T, H, W]      │
+                 │                              │
+                 └──── frozen ABot SFT Wan DiT ◄┘
+                                  │
+                                  ▼
+                    16-frame 640×480 MP4
+~~~
 
-`official_submission_kit`의 코드, 모델, checkpoint 또는 결과를 학습 loss,
-feature extractor, validation metric, 후보 생성·선택, reranking, 후처리,
-영상 수정에 사용하지 않습니다.
+- Wan2.1-I2V-14B visual prior와 ABot robot-domain SFT DiT는 고정
+- VACE adapter와 18D→96-channel latent action encoder만 학습
+- 16개 실제 action 뒤에 Wan tokenizer용 synthetic tail 1개만 추가
+- checkpoint에 VACE와 action encoder를 함께 저장
+- optimizer, scheduler, RNG 상태를 별도 저장해 정확한 재개 지원
+- TeaCache와 persistent-VRAM 모드로 1시간 추론 제한 충족
 
-## 로컬 검증
+핵심 구현:
 
-```bash
-cd /Users/choeseong-yong/Inha_challenge
+- [integrations/abot_physworld/so100_action_condition_v2.py](integrations/abot_physworld/so100_action_condition_v2.py)
+- [scripts/train_abot_so100_vace_v2.py](scripts/train_abot_so100_vace_v2.py)
+- [scripts/infer_abot_so100_vace_v2.py](scripts/infer_abot_so100_vace_v2.py)
+- [scripts/run_abot_so100_vace_v2_48h.sh](scripts/run_abot_so100_vace_v2_48h.sh)
 
-PYTHONPATH=src:. /opt/anaconda3/bin/python -m pytest -q
+## 실험 경로와 완료 결과
 
-PYTHONPATH=src /opt/anaconda3/bin/python -m inha_worldmodel.train \
-  --config configs/flow_smoke.yaml
+| 경로 | 역할 | 완료 상태 | 전체 eval 추론 |
+|---|---|---|---:|
+| DynamiCrafter-plus | 대회 action-conditioned baseline 정제 | gate와 17K final refit 구현 | 216 MP4 경로 검증 |
+| Cosmos-Predict2.5 2B | 공개 action-conditioned world model post-training | 14K→32K 완료 | 705.7초 |
+| ABot/Wan VACE v2 | 14B robot SFT prior + lossless 6D adapter | 정확한 상태 14K 저장 | step 10K, 3,007.8초 |
 
-PYTHONPATH=src /opt/anaconda3/bin/python -m inha_worldmodel.infer \
-  --checkpoint outputs/flow_smoke/best.pt \
-  --eval-root data/eval \
-  --output-dir artifacts/smoke_videos \
-  --device cpu \
-  --limit 1
-```
+ABot v2 시간 인증 실행은 step 10,000, 12 denoising steps, CFG 1.0,
+TeaCache threshold 0.2, persistent VRAM으로 216/216개를 약 50분 8초에
+완료했습니다. 학습은 14,000 step까지 이어졌지만 표의 추론 시간은 실제
+전체 eval 검증을 마친 10,000-step checkpoint 기준입니다.
 
-중요 artifact는 원본 데이터에서 재생성할 수 있습니다.
+Cosmos 결과는
+[reports/COSMOS_32K_FINAL_MODEL.md](reports/COSMOS_32K_FINAL_MODEL.md),
+전체 발전 과정은
+[reports/MODEL_IMPLEMENTATION_SUMMARY.md](reports/MODEL_IMPLEMENTATION_SUMMARY.md)에
+있습니다. 이 저장소는 리더보드 점수를 재현한다고 주장하지 않으며, 위 수치는
+로컬 완료 상태와 wall-clock 기록입니다.
 
-```bash
-PYTHONPATH=src /opt/anaconda3/bin/python scripts/build_manifest.py
-PYTHONPATH=src /opt/anaconda3/bin/python scripts/build_folds.py
-PYTHONPATH=src /opt/anaconda3/bin/python \
-  scripts/build_checkpoint_pristine_split.py
-PYTHONPATH=src /opt/anaconda3/bin/python scripts/prepare_dynamicrafter_stats.py \
-  --validation-protocol official_checkpoint_pristine \
-  --fold-artifact artifacts/folds/official_baseline_seed0_pristine.json \
-  --fold-id official_baseline_seed0_validation \
-  --output artifacts/stats/dynamicrafter_action_stats_checkpoint_pristine.json
-PYTHONPATH=src /opt/anaconda3/bin/python scripts/prepare_dynamicrafter_stats.py \
-  --training-scope all_clean \
-  --output artifacts/stats/dynamicrafter_action_stats_all_clean.json
-```
+## 저장소 구조
 
-## DynamiCrafter-plus GPU 경로
+~~~text
+configs/                         DynamiCrafter 및 경량 모델 설정
+docs/                            다운로드와 서버 전송 문서
+integrations/
+  abot_physworld/                SO-100 action→VACE adapter
+  cosmos_predict25/              Cosmos dataset/config/inference adapter
+patches/                         고정 upstream commit용 patch
+reports/                         규칙, 데이터, 모델 선택, 실행 결과
+scripts/                         준비, 학습, 추론, 감사 실행기
+src/inha_worldmodel/             공통 데이터·검증·모델 라이브러리
+tests/                           CPU 단위·통합 테스트
+artifacts/                       재생성 manifest/fold/statistics; Git 제외
+models/                          로컬 가중치; Git 제외
+outputs/                         checkpoint/log/video; Git 제외
+~~~
 
-대회 baseline requirements를 별도 CUDA 환경에 설치하고, 공식 notebook에
-기재된 공개 backbone을 `open/baseline/checkpoints/backbone.ckpt`에
-다운로드합니다. 실제 checksum과 license는
-`reports/PRETRAINED_MODELS.md`에 기록해야 합니다.
+## 권장 작업공간과 환경변수
 
-```bash
-export INHA_PROJECT_ROOT=/workspace/Inha_challenge
-export INHA_OPEN_ROOT=/workspace/open
-export INHA_BASELINE_ROOT="$INHA_OPEN_ROOT/baseline"
-export PYTHONPATH="$INHA_PROJECT_ROOT/src:$PYTHONPATH"
+~~~text
+workspace/
+├── Inha_challenge/
+├── abot-physworld/
+├── cosmos-predict2.5/           # Cosmos 재현 시에만 필요
+└── data_challenge/
+    ├── data/train/
+    ├── data/eval/
+    ├── baseline/
+    └── submission_kit/
+~~~
 
-# RTX PRO 6000 Blackwell 환경에서는 먼저 cu128 wheel을 명시적으로 설치
-python -m pip install torch==2.7.1 torchvision==0.22.1 \
-  --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -r "$INHA_BASELINE_ROOT/requirements.txt"
-python -m pip install -e "$INHA_PROJECT_ROOT"
+~~~bash
+export PROJECT_ROOT=/workspace/Inha_challenge
+export ABOT_ROOT=/workspace/abot-physworld
+export COSMOS_ROOT=/workspace/cosmos-predict2.5
+export OPEN_ROOT=/workspace/data_challenge
+export PYTHON_BIN=/path/to/python
 
-mkdir -p "$INHA_BASELINE_ROOT/checkpoints"
-curl --fail --location \
-  https://huggingface.co/Doubiiu/DynamiCrafter_512/resolve/main/model.ckpt \
-  --output "$INHA_BASELINE_ROOT/checkpoints/backbone.ckpt"
-sha256sum "$INHA_BASELINE_ROOT/checkpoints/backbone.ckpt"
+cd "$PROJECT_ROOT"
+export PYTHONPATH="$PROJECT_ROOT/src:$PROJECT_ROOT"
+~~~
 
-python "$INHA_PROJECT_ROOT/scripts/preflight_dynamicrafter_gpu.py" \
-  --project-root "$INHA_PROJECT_ROOT" \
-  --open-root "$INHA_OPEN_ROOT" \
-  --baseline-root "$INHA_BASELINE_ROOT"
+## 설치
 
-torchrun --standalone --nproc_per_node=1 \
-  "$INHA_PROJECT_ROOT/scripts/train_dynamicrafter_plus.py" \
-  --baseline-root "$INHA_BASELINE_ROOT" \
-  --project-root "$INHA_PROJECT_ROOT" \
-  --open-root "$INHA_OPEN_ROOT" \
-  --base \
-    "$INHA_PROJECT_ROOT/configs/dynamicrafter_plus.yaml" \
-    "$INHA_PROJECT_ROOT/configs/dynamicrafter_checkpoint_pristine.yaml" \
-  --train
-```
+Python 3.11과 CUDA 호환 PyTorch 환경을 권장합니다. PyTorch는 GPU 드라이버와
+CUDA에 맞는 공식 wheel을 먼저 설치합니다.
 
-GPU에서는 수동 후보 명령 대신 감사 가능한 계획을 생성·실행합니다.
+~~~bash
+cd "$PROJECT_ROOT"
 
-```bash
-python scripts/plan_dynamicrafter_gates.py \
-  --project-root "$INHA_PROJECT_ROOT" \
-  --open-root "$INHA_OPEN_ROOT" \
-  --baseline-root "$INHA_BASELINE_ROOT" \
-  --max-steps 1000 \
-  --plan-root outputs/dynamicrafter_gate_1000 \
-  --output outputs/dynamicrafter_gate_1000/plan.json
+"$PYTHON_BIN" -m pip install -e ".[dev]"
+"$PYTHON_BIN" -m pip install -r requirements_abot_so100.txt
+"$PYTHON_BIN" -m pip install -r "$ABOT_ROOT/requirements.txt"
+~~~
 
-python scripts/run_dynamicrafter_gate_plan.py \
-  --plan outputs/dynamicrafter_gate_1000/plan.json --execute
-```
+## 외부 upstream 고정과 patch
 
-실행기는 fresh GPU preflight, checkpoint/config/source hash, 정확한 global step,
-main/EMA 완전성·finite 여부, 고정 holdout 보고서, action sensitivity 및
-보수적 216개/1시간 projection을 모두 통과시킨 뒤
-`candidate_selection.json`을 생성합니다.
+ABot-PhysWorld:
 
-중단 후에는 제공된 1,500-step weight 파일을 직접 resume하지 않습니다.
-동일 plan의 전체 checkpoint·config 계약을 실행기가 재검증한 뒤에만
-재개합니다.
+~~~bash
+git clone https://github.com/amap-cvlab/ABot-PhysWorld.git "$ABOT_ROOT"
+git -C "$ABOT_ROOT" checkout 7d47080ea122346e6b7c1cb37c2a8d43730f624c
+git -C "$ABOT_ROOT" apply "$PROJECT_ROOT/patches/abot-physworld-7d47080.patch"
+~~~
 
-```bash
-python scripts/run_dynamicrafter_gate_plan.py \
-  --plan outputs/dynamicrafter_gate_1000/plan.json \
-  --execute --resume
-```
+ABot patch는 robot SFT DiT 선행 로드, 17-frame tail padding, direct VACE
+context, bundled state strict load, persistent VRAM, prompt cache, TeaCache,
+첫 관측 frame 보존을 포함합니다.
 
-해상도와 표본 균형은 YAML overlay로만 비교합니다. 384p는 4:3 영상을
-padding 없이 쓰는 우선 고해상도 후보이고, 480p는 4일/1시간 gate를
-통과할 때만 유지합니다.
+Cosmos-Predict2.5:
 
-```bash
-# 예: 384×512
---base configs/dynamicrafter_plus.yaml \
-       configs/dynamicrafter_checkpoint_pristine.yaml \
-       configs/dynamicrafter_plus_384.yaml
+~~~bash
+git clone https://github.com/nvidia-cosmos/cosmos-predict2.5.git "$COSMOS_ROOT"
+git -C "$COSMOS_ROOT" checkout a2c298b0a3df3778b973fe65e9e58877b292d8a7
+git -C "$COSMOS_ROOT" apply "$PROJECT_ROOT/patches/cosmos-predict2.5-a2c298b.patch"
+~~~
 
-# 별도 ablation: owner 빈도 제곱근 보정
---base configs/dynamicrafter_plus.yaml \
-       configs/dynamicrafter_checkpoint_pristine.yaml \
-       configs/dynamicrafter_owner_tempered.yaml
+Cosmos 환경은 upstream uv.lock을 사용합니다. 프로젝트 runner가 SO-100
+experiment overlay를 생성합니다. 자세한 절차는
+[integrations/cosmos_predict25/README.md](integrations/cosmos_predict25/README.md)를
+따릅니다.
 
-# 별도 ablation: absolute + window delta + velocity 18D
---base configs/dynamicrafter_plus.yaml \
-       configs/dynamicrafter_checkpoint_pristine.yaml \
-       configs/dynamicrafter_kinematic18.yaml
-```
+## 공개 가중치 준비
 
-18D variant는 제공 checkpoint의 첫 action MLP main/EMA weight만
-`6→18`로 늘리고 새 12개 열을 0으로 초기화합니다. 따라서 학습 시작 전
-출력은 6D baseline과 정확히 같고, 나머지 1,106개 main UNet tensor를
-그대로 보존합니다.
+| 모델 | 원 배포처 | 역할 |
+|---|---|---|
+| Wan-AI/Wan2.1-I2V-14B-480P | ModelScope/Hugging Face | 14B DiT, CLIP |
+| Wan-AI/Wan2.1-T2V-1.3B | ModelScope/Hugging Face | UMT5, Wan VAE |
+| amap_cvlab/Abot-PhysWorld | ModelScope | robot SFT DiT |
+| nvidia/Cosmos-Predict2.5-2B | Hugging Face | 선택적 Cosmos 경로 |
 
-각 checkpoint는 gate plan에 기록된 정확한 base→pristine→candidate→runtime
-config 순서로 동일한 고정 holdout에서 original/cross-clip action을 각각
-생성합니다. 수동 validation 명령 대신 위 gate 실행기를 사용해야 checkpoint
-계약과 비교 조건이 보존됩니다.
+~~~bash
+modelscope download Wan-AI/Wan2.1-I2V-14B-480P \
+  --local-dir "$PROJECT_ROOT/models/Wan-AI/Wan2.1-I2V-14B-480P"
 
-alignment·해상도·sampler·update 수를 고정한 뒤에는 자동 생성된 immutable
-plan으로 전체 정제 데이터 refit을 한 번 실행합니다. 수동으로 overlay나
-checkpoint를 조합하지 않습니다.
+modelscope download Wan-AI/Wan2.1-T2V-1.3B \
+  --local-dir "$PROJECT_ROOT/models/Wan-AI/Wan2.1-T2V-1.3B"
 
-```bash
-PYTHONPATH=src:. python scripts/plan_dynamicrafter_final_refit.py \
-  --gate-plan outputs/dynamicrafter_gate_1000/plan.json \
-  --selection outputs/dynamicrafter_gate_1000/candidate_selection.json \
-  --plan-root outputs/dynamicrafter_final_refit
+modelscope download amap_cvlab/Abot-PhysWorld \
+  --local-dir "$PROJECT_ROOT/models/Abot-PhysWorld"
+~~~
 
-PYTHONPATH=src:. python scripts/run_dynamicrafter_final_refit.py \
-  --plan outputs/dynamicrafter_final_refit/plan.json
+필수 배치는 다음과 같습니다.
 
-# preview를 확인한 뒤 GPU에서만 실행
-PYTHONPATH=src:. python scripts/run_dynamicrafter_final_refit.py \
-  --plan outputs/dynamicrafter_final_refit/plan.json --execute
-```
+~~~text
+models/
+├── Abot-PhysWorld/abotpw_i2v_480p.safetensors
+└── Wan-AI/
+    ├── Wan2.1-I2V-14B-480P/
+    │   ├── diffusion_pytorch_model-00001-of-00007.safetensors
+    │   ├── ...
+    │   ├── diffusion_pytorch_model-00007-of-00007.safetensors
+    │   └── models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth
+    └── Wan2.1-T2V-1.3B/
+        ├── models_t5_umt5-xxl-enc-bf16.pth
+        └── Wan2.1_VAE.pth
+~~~
 
-고정 train holdout에서 sampling 설정과 checkpoint를 선택하고 전체 refit을
-완료한 뒤에만 eval을 한 번 생성합니다. 학습 때 사용한 overlay를 같은
-순서로 모두 넘겨야 embedded contract가 일치합니다.
+다운로드 복구와 크기 검증은
+[docs/WAN14B_WINDOWS_DOWNLOAD_TRANSFER.md](docs/WAN14B_WINDOWS_DOWNLOAD_TRANSFER.md)를
+참고하십시오. 가중치는 이 저장소에서 재배포하지 않습니다.
 
-```bash
-PYTHONPATH="$INHA_PROJECT_ROOT/src" python \
-  "$INHA_PROJECT_ROOT/scripts/infer_dynamicrafter_plus.py" \
-  --config \
-    "$INHA_PROJECT_ROOT/configs/dynamicrafter_plus.yaml" \
-    "$INHA_PROJECT_ROOT/configs/dynamicrafter_checkpoint_pristine.yaml" \
-    "$INHA_PROJECT_ROOT/configs/dynamicrafter_plus_384.yaml" \
-    "$INHA_PROJECT_ROOT/configs/dynamicrafter_plus_refit_all.yaml" \
-    /path/to/final_runtime_overlay.yaml \
-  --checkpoint /path/to/selected.ckpt \
-  --final-refit-plan /path/to/final_refit/plan.json \
-  --baseline-root "$INHA_BASELINE_ROOT" \
-  --project-root "$INHA_PROJECT_ROOT" \
-  --open-root "$INHA_OPEN_ROOT" \
-  --eval-root "$INHA_OPEN_ROOT/data/eval" \
-  --output-dir "$INHA_PROJECT_ROOT/artifacts/predictions/dynamicrafter_plus"
-```
+## 데이터 준비
 
-Cosmos 2.5 준비·학습·DMD2 명령과 1시간/4일 gate는
-`integrations/cosmos_predict25/README.md`를 따릅니다.
+manifest와 leakage-safe fold:
 
-## 출력 감사
+~~~bash
+cd "$PROJECT_ROOT"
 
-최종 영상 형식만 submission kit와 무관하게 검사합니다.
+PYTHONPATH=src:. "$PYTHON_BIN" scripts/build_manifest.py \
+  --train-root "$OPEN_ROOT/data/train" \
+  --output-dir artifacts/manifests
 
-```bash
-PYTHONPATH=src python scripts/audit_videos.py \
-  --video-root artifacts/predictions/final \
-  --eval-root data/eval \
-  --output artifacts/predictions/final/video_audit.json
-```
+PYTHONPATH=src:. "$PYTHON_BIN" scripts/build_folds.py \
+  --manifest artifacts/manifests/train_episodes.jsonl \
+  --output artifacts/folds/folds.json
+~~~
 
-216개 모두 16 frames, 6fps, 640×480이고 checksum이 고정된 뒤에만 최종
-CSV 변환 단계로 넘어갑니다.
+실제 감사 결과는 원본 128 repositories, 11,132 episodes,
+정제 후 126 repositories, 11,002 episodes입니다. 기본
+seeded_group_00_seed_17 fold는 train 8,802 / validation 2,200이며
+owner/repository overlap은 0입니다.
 
-## 현재 하드웨어 제약
+train-fold action statistics:
 
-현재 로컬 머신은 Apple M3 MacBook Air 16GB라 데이터 감사와 CPU 스모크만
-가능합니다. 수상권 학습에는 대회 재현 기준인 단일 RTX PRO 6000 96GB급
-GPU가 필요합니다. GPU 작업 우선순위와 중단 기준은
-`reports/GPU_RUNBOOK.md`, 규정은 `reports/RULES.md`를 확인합니다.
+~~~bash
+PYTHONPATH=src:. "$PYTHON_BIN" scripts/prepare_so100_action_stats.py \
+  --manifest artifacts/manifests/train_episodes.jsonl \
+  --train-root "$OPEN_ROOT/data/train" \
+  --fold-artifact artifacts/folds/folds.json \
+  --fold-id seeded_group_00_seed_17 \
+  --output artifacts/cosmos_predict25/action_robust_stats_fold17.json
+~~~
+
+ABot metadata:
+
+~~~bash
+PYTHONPATH=src:. "$PYTHON_BIN" scripts/prepare_abot_so100.py \
+  --manifest artifacts/manifests/train_episodes.jsonl \
+  --data-root "$OPEN_ROOT/data/train" \
+  --stats artifacts/cosmos_predict25/action_robust_stats_fold17.json \
+  --output-root outputs/abot_so100_train \
+  --metadata outputs/abot_so100_train/metadata.jsonl
+~~~
+
+## ABot VACE v2 학습
+
+step 제한 없이 4일보다 30분 짧은 wall-clock budget 예시입니다.
+
+~~~bash
+cd "$PROJECT_ROOT"
+
+export CUDA_VISIBLE_DEVICES=1
+export OUTPUT_PATH="$PROJECT_ROOT/outputs/abot_so100_vace_v2_final"
+export DIT_CHECKPOINT="$PROJECT_ROOT/models/Abot-PhysWorld/abotpw_i2v_480p.safetensors"
+
+ABOT_ROOT="$ABOT_ROOT" \
+OPEN_ROOT="$OPEN_ROOT" \
+PYTHON_BIN="$PYTHON_BIN" \
+OUTPUT_PATH="$OUTPUT_PATH" \
+DIT_CHECKPOINT="$DIT_CHECKPOINT" \
+bash scripts/run_abot_so100_vace_v2_48h.sh \
+  --max_train_seconds 343800
+~~~
+
+주요 설정은 480×640, 17 model frames, learning rate 5e-6,
+weight decay 0.01, VACE+latent action encoder 학습, 1,000-step checkpoint,
+최근 4개 및 5,000-step milestone 보존입니다. 저장 전 최소 100GiB 여유
+공간을 검사합니다.
+
+정확한 재개:
+
+~~~bash
+export RESUME_STEP=14000
+
+ABOT_ROOT="$ABOT_ROOT" \
+OPEN_ROOT="$OPEN_ROOT" \
+PYTHON_BIN="$PYTHON_BIN" \
+OUTPUT_PATH="$OUTPUT_PATH" \
+DIT_CHECKPOINT="$DIT_CHECKPOINT" \
+bash scripts/run_abot_so100_vace_v2_48h.sh \
+  --resume_from_step "$RESUME_STEP" \
+  --max_train_seconds 21600
+~~~
+
+latest_training_state.pt와 같은 step의 safetensors가 함께 있어야
+optimizer, scheduler, RNG까지 복원됩니다.
+
+## ABot VACE v2 추론
+
+eval JSONL:
+
+~~~bash
+PYTHONPATH=src:. "$PYTHON_BIN" scripts/prepare_abot_so100_eval.py \
+  --eval-root "$OPEN_ROOT/data/eval" \
+  --output outputs/abot_so100_eval.jsonl
+~~~
+
+실제로 1시간 제한을 통과한 전체 추론 구성:
+
+~~~bash
+export CUDA_VISIBLE_DEVICES=0
+export INFER_OUTPUT="$PROJECT_ROOT/outputs/abot_so100_vace_v2_inference"
+
+PYTHONPATH=src:. "$PYTHON_BIN" scripts/infer_abot_so100_vace_v2.py \
+  --abot-root "$ABOT_ROOT" \
+  --jsonl outputs/abot_so100_eval.jsonl \
+  --action-stats artifacts/cosmos_predict25/action_robust_stats_fold17.json \
+  --checkpoint "$OUTPUT_PATH/step-10000.safetensors" \
+  --dit-checkpoint "$DIT_CHECKPOINT" \
+  --output-root "$INFER_OUTPUT" \
+  --height 480 \
+  --width 640 \
+  --steps 12 \
+  --cfg-scale 1.0 \
+  --seed 0 \
+  --fps 6 \
+  --persistent-vram \
+  --tea-cache-l1-thresh 0.2
+~~~
+
+성공하면 inference_manifest.json, predictions/inference_provenance.json,
+sample_000000.mp4부터 sample_000215.mp4까지 생성됩니다.
+
+## 제출 전 감사와 CSV
+
+submission kit과 독립된 감사:
+
+~~~bash
+PYTHONPATH=src:. "$PYTHON_BIN" scripts/audit_pre_submission.py \
+  --video-root "$INFER_OUTPUT/predictions" \
+  --eval-root "$OPEN_ROOT/data/eval" \
+  --provenance "$INFER_OUTPUT/predictions/inference_provenance.json" \
+  --output "$INFER_OUTPUT/pre_submission_audit.json"
+~~~
+
+최종 MP4가 확정된 뒤에만 원본 submission kit을 실행합니다.
+
+~~~bash
+export SUBMISSION_KIT_ROOT="$OPEN_ROOT/submission_kit"
+cd "$SUBMISSION_KIT_ROOT"
+
+CUDA_VISIBLE_DEVICES=0 "$PYTHON_BIN" make_submission_csv.py \
+  --prediction-root "$INFER_OUTPUT/predictions" \
+  --challenge-root "$OPEN_ROOT/data/eval" \
+  --output-csv "$INFER_OUTPUT/submission_features.csv" \
+  --action-stats-path "$OPEN_ROOT/data/train/so100_action_statistics.json" \
+  --action-extractor-ckpt "$SUBMISSION_KIT_ROOT/checkpoints/action_extractor.ckpt"
+~~~
+
+생성 CSV를 수정하지 않으며 submission kit을 학습, validation, 모델 선택,
+영상 후처리에 사용하지 않습니다.
+
+## Cosmos 32K 경로
+
+~~~bash
+cd "$PROJECT_ROOT"
+export CUDA_VISIBLE_DEVICES=1
+
+"$COSMOS_ROOT/.venv/bin/python" scripts/run_cosmos_predict25_so100.py \
+  --upstream-root "$COSMOS_ROOT" \
+  --open-root "$OPEN_ROOT" \
+  --output-root outputs/cosmos_predict25_so100_32k \
+  --max-iter 32000 \
+  --grad-accum-iter 8 \
+  --override model.config.net.atten_backend=transformer_engine \
+  --execute
+~~~
+
+14K 정확 재개, EMA 변환, 추론은
+[reports/COSMOS_32K_FINAL_MODEL.md](reports/COSMOS_32K_FINAL_MODEL.md)와
+[integrations/cosmos_predict25/README.md](integrations/cosmos_predict25/README.md)를
+참고하십시오.
+
+## DynamiCrafter-plus 경로
+
+DynamiCrafter는 owner-disjoint fold, same-step/previous-command alignment,
+320/384 gate, cross-clip action sensitivity, immutable final-refit plan,
+checkpoint/config/source hash 계약을 구현합니다.
+
+- [reports/CANDIDATE_SELECTION.md](reports/CANDIDATE_SELECTION.md)
+- [reports/FINAL_REFIT.md](reports/FINAL_REFIT.md)
+- [reports/DYNAMICRAFTER_VALIDATION.md](reports/DYNAMICRAFTER_VALIDATION.md)
+- [reports/GPU_RUNBOOK.md](reports/GPU_RUNBOOK.md)
+
+## 테스트
+
+가중치 없이 실행 가능한 CPU 테스트:
+
+~~~bash
+cd "$PROJECT_ROOT"
+PYTHONPATH=src:. "$PYTHON_BIN" -m pytest -q
+~~~
+
+형식과 import 검사:
+
+~~~bash
+git diff --check
+"$PYTHON_BIN" -m compileall -q src integrations scripts
+~~~
+
+## 재현성과 보안 경계
+
+- train과 eval 경로를 분리
+- 통계와 fold는 train만 사용
+- eval은 고정 checkpoint 추론 입력으로만 사용
+- submission kit은 MP4 확정 후 CSV 변환에만 사용
+- checkpoint, 데이터, 영상, CSV, credential은 Git에 저장하지 않음
+- manifest에 checkpoint, 통계, source hash와 wall-clock 기록
+- 절대 경로가 있는 운영 스크립트는 대회 서버 기록용이며, 이 README의
+  환경변수 기반 명령을 canonical 재현 경로로 사용
+
+## 외부 프로젝트와 라이선스
+
+- [ABot-PhysWorld](https://github.com/amap-cvlab/ABot-PhysWorld)
+- [Wan2.1](https://github.com/Wan-Video/Wan2.1)
+- [NVIDIA Cosmos-Predict2.5](https://github.com/nvidia-cosmos/cosmos-predict2.5)
+- [DynamiCrafter](https://github.com/Doubiiu/DynamiCrafter)
+
+Wan2.1과 Cosmos 소스는 각 배포처의 라이선스를 따르며 Cosmos 모델 가중치는
+NVIDIA Open Model License를 따릅니다. DynamiCrafter와 ABot checkpoint도
+원 배포처의 사용 조건을 별도로 확인해야 합니다.
+
+patches 디렉터리는 수정분만 기록하며 원본 저장소나 가중치를 포함하지
+않습니다. 공개 배포 전에는 팀 소유 코드의 최종 라이선스를 별도로 결정해야
+합니다.
