@@ -2,7 +2,7 @@
 
 초기 로봇 이미지 1장과 16-step 6D action sequence를 입력으로 받아 이후 16-frame 로봇 영상을 생성하는 World Model 프로젝트입니다. [2026 인하 인공지능 챌린지](https://dacon.io/competitions/official/236736/overview/description)를 위해 데이터 점검, 모델 학습·추론, 후보 선택과 제출 전 검증 코드를 구현했습니다.
 
-이 저장소에는 대회 데이터, 사전학습 가중치, 학습 checkpoint, 생성 영상과 제출 CSV가 포함되어 있지 않습니다. 공개 코드는 실험 경로와 재현 절차를 보존하며 리더보드 점수를 별도로 주장하지 않습니다.
+대회 데이터, 사전학습 가중치와 학습 checkpoint는 별도로 준비합니다.
 
 ## 대회 과제
 
@@ -16,13 +16,11 @@
 
 ## 구현한 모델 경로
 
-| 모델 경로 | 구현 내용 | 저장소에 기록된 상태 |
+| 모델 경로 | 구현 내용 | 구현 상태 |
 | --- | --- | --- |
 | **DynamiCrafter-plus** | 대회 video prior를 기반으로 action alignment, 학습 해상도, checkpoint 후보를 비교하고 owner-disjoint holdout과 action-sensitivity gate로 선택 | 학습·선택·final refit·216개 MP4 추론 경로 구현 |
-| **Cosmos-Predict2.5 2B** | SO-100 데이터 adapter, 6D action conditioning, zero text embedding과 Blackwell용 attention backend를 추가해 14K checkpoint에서 32K까지 재학습 | 32K EMA로 216개 영상 생성 기록, 약 705.7초 wall time |
-| **ABot-PhysWorld + Wan2.1-I2V-14B + VACE v2** | visual/robot prior는 고정하고 VACE adapter와 6D action encoder만 학습 | 14K 학습 상태 저장, 10K checkpoint 전체 eval 추론 약 3,007.8초 |
-
-위 시간은 저장소 보고서에 기록된 단일 RTX PRO 6000 실행 wall time이며 리더보드 성능 수치가 아닙니다.
+| **Cosmos-Predict2.5 2B** | SO-100 데이터 adapter, 6D action conditioning, zero text embedding과 Blackwell용 attention backend를 추가해 14K checkpoint에서 32K까지 재학습 | 32K EMA 추론 경로 구현 |
+| **ABot-PhysWorld + Wan2.1-I2V-14B + VACE v2** | visual/robot prior는 고정하고 VACE adapter와 6D action encoder만 학습 | 14K 학습 및 10K checkpoint 추론 경로 구현 |
 
 ## 최종 고용량 경로: ABot/Wan VACE v2
 
@@ -81,7 +79,7 @@ python3 -m pip install -r /path/to/abot-physworld/requirements.txt
 
 Cosmos 경로는 Cosmos-Predict2.5 upstream의 `uv.lock` 환경을 사용합니다. 세 모델의 upstream revision과 patch, 가중치 배치는 [`THIRD_PARTY.md`](THIRD_PARTY.md)와 각 보고서를 확인하십시오.
 
-## 권장 디렉터리
+## 프로젝트 배치 예시
 
 ```text
 workspace/
@@ -178,16 +176,13 @@ PYTHONPATH=src:. python3 -m pytest -q
 python3 -m compileall -q src integrations scripts
 ```
 
-이 검사는 코드 계약과 데이터 처리 로직을 확인하며 실제 생성 품질이나 GPU 추론 시간을 검증하지는 않습니다.
-
-## 재현성과 제한 사항
+## 재현 구성
 
 - train과 eval을 분리하고 통계와 fold는 train에서만 계산합니다.
 - eval은 고정 checkpoint의 추론 입력으로만 사용합니다.
 - submission kit은 최종 MP4를 CSV로 변환하는 단계에서만 사용합니다.
 - checkpoint, 원본 데이터, 생성 영상, 제출 CSV와 credential은 Git에서 제외합니다.
 - manifest와 실행 기록에 checkpoint·통계·source hash와 wall time을 남깁니다.
-- 모델 성능 비교와 최종 선택의 상세 근거는 `reports/`에 있으며, 공개 저장소만으로 대회 점수를 재현할 수는 없습니다.
 
 ## 외부 프로젝트
 
